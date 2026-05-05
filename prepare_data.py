@@ -214,14 +214,48 @@ def handle_position_bias(df: pd.DataFrame, is_train: bool = True) -> pd.DataFram
     return df
 
 
+#OUTLIER HANDLING
+#
+# Trees are robust to outliers, so we clip rather than remove.
+# Thresholds are IQR-based and computed on training data only.
+
+CLIP_COLS = ["price_usd", "orig_destination_distance", "gross_bookings_usd"]
+
+def compute_clip_bounds(train: pd.DataFrame, cols: list[str], k: float = 3.0) -> dict:
+    bounds = {}
+    for col in cols:
+        if col not in train.columns:
+            continue
+        q1, q3 = train[col].quantile(0.25), train[col].quantile(0.75)
+        iqr = q3 - q1
+        bounds[col] = (q1 - k * iqr, q3 + k * iqr)
+    return bounds
+
+def clip_outliers(df: pd.DataFrame, bounds: dict) -> pd.DataFrame:
+    df = df.copy()
+    for col, (lo, hi) in bounds.items():
+        if col in df.columns:
+            df[col] = df[col].clip(lower=lo, upper=hi)
+    return df
+
+def report_outliers(df: pd.DataFrame, bounds: dict) -> None:
+    for col, (lo, hi) in bounds.items():
+        if col not in df.columns:
+            continue
+        n = ((df[col] < lo) | (df[col] > hi)).sum()
+        print(f"  {col}: {n:,} outliers clipped  (bounds [{lo:.2f}, {hi:.2f}])")
+
+
 # MASTER PIPELINE
 
-def prepare(df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
+def prepare(df: pd.DataFrame, is_train: bool = True, clip_bounds: dict = None) -> pd.DataFrame:
     df = add_date_features(df)
     df = impute_missing(df)
     df = add_visitor_history_indicators(df)
     df = add_gap_features(df)
     df = add_listwise_features(df)
+    if clip_bounds:
+        df = clip_outliers(df, clip_bounds)
     if is_train:
         df = add_target_columns(df)
         df = handle_position_bias(df, is_train=True)
@@ -234,11 +268,15 @@ if __name__ == "__main__":
     train_raw = load_data(TRAIN_PATH)
     test_raw  = load_data(TEST_PATH)
 
+    print("Computing outlier bounds from training data...")
+    clip_bounds = compute_clip_bounds(train_raw, CLIP_COLS)
+    report_outliers(train_raw, clip_bounds)
+
     print("Preparing training set...")
-    train = prepare(train_raw, is_train=True)
+    train = prepare(train_raw, is_train=True, clip_bounds=clip_bounds)
 
     print("Preparing test set...")
-    test = prepare(test_raw, is_train=False)
+    test = prepare(test_raw, is_train=False, clip_bounds=clip_bounds)
 
     print("Adding target encodings...")
     train, test = add_target_encodings(train, test)
