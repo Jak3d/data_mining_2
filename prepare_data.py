@@ -146,10 +146,10 @@ def add_target_encodings(
     train, test = train.copy(), test.copy()
 
     encoding_specs = [
-        (["prop_id"],                          "click_bool",   "prop_ctr"),
-        (["prop_id"],                          "booking_bool", "prop_cvr"),
-        (["srch_destination_id"],              "booking_bool", "dest_cvr"),
-        (["prop_id", "srch_booking_window"],   "booking_bool", "prop_cvr_bw"),
+        (["prop_id"],                        "click_bool",   "prop_ctr"),
+        (["prop_id"],                        "booking_bool", "prop_cvr"),
+        (["srch_destination_id"],            "booking_bool", "dest_cvr"),
+        (["prop_id", "srch_booking_window"], "booking_bool", "prop_cvr_bw"),
     ]
 
     for keys, target, name in encoding_specs:
@@ -214,6 +214,42 @@ def handle_position_bias(df: pd.DataFrame, is_train: bool = True) -> pd.DataFram
     return df
 
 
+#COMPETITOR AGGREGATES
+#
+# Collapse 24 sparse comp* columns into 3 signals [report §3]
+
+def add_competitor_aggregates(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["comp_count"]         = df[COMP_RATE_COLS].notna().sum(axis=1)
+    df["comp_cheaper_count"] = (df[COMP_RATE_COLS] == -1).sum(axis=1)
+    df["comp_diff_mean"]     = df[COMP_DIFF_COLS].mean(axis=1)
+    return df
+
+
+#MISSINGNESS FLAGS
+#
+# Absence is informative for distance, visitor history, and competitor blocks [report §3]
+
+def add_missingness_flags(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["dist_missing"]         = df["orig_destination_distance"].isna().astype(int)
+    df["visitor_hist_missing"] = df["visitor_hist_starrating"].isna().astype(int)
+    df["comp_missing"]         = df[COMP_RATE_COLS].isna().all(axis=1).astype(int)
+    return df
+
+
+#PRICE LOG TRANSFORM
+#
+# Cap at 99.5th percentile then log(1+price) to reduce right skew [report §3]
+
+def transform_price(df: pd.DataFrame, cap: float = None) -> pd.DataFrame:
+    df = df.copy()
+    if cap is not None:
+        df["price_usd"] = df["price_usd"].clip(upper=cap)
+    df["log_price"] = np.log1p(df["price_usd"])
+    return df
+
+
 #OUTLIER HANDLING
 #
 # Trees are robust to outliers, so we clip rather than remove.
@@ -248,11 +284,14 @@ def report_outliers(df: pd.DataFrame, bounds: dict) -> None:
 
 # MASTER PIPELINE
 
-def prepare(df: pd.DataFrame, is_train: bool = True, clip_bounds: dict = None) -> pd.DataFrame:
+def prepare(df: pd.DataFrame, is_train: bool = True, clip_bounds: dict = None, price_cap: float = None) -> pd.DataFrame:
     df = add_date_features(df)
+    df = add_missingness_flags(df)   # before imputation so NaNs are still present
     df = impute_missing(df)
+    df = add_competitor_aggregates(df)
     df = add_visitor_history_indicators(df)
     df = add_gap_features(df)
+    df = transform_price(df, cap=price_cap)
     df = add_listwise_features(df)
     if clip_bounds:
         df = clip_outliers(df, clip_bounds)
@@ -264,29 +303,39 @@ def prepare(df: pd.DataFrame, is_train: bool = True, clip_bounds: dict = None) -
     return df
 
 if __name__ == "__main__":
-    print("Loading data...")
+    print("Loading data ")
     train_raw = load_data(TRAIN_PATH)
     test_raw  = load_data(TEST_PATH)
 
-    print("Computing outlier bounds from training data...")
+    print("Computing outlier bounds from training data ")
     clip_bounds = compute_clip_bounds(train_raw, CLIP_COLS)
     report_outliers(train_raw, clip_bounds)
 
-    print("Preparing training set...")
-    train = prepare(train_raw, is_train=True, clip_bounds=clip_bounds)
+    price_cap = train_raw["price_usd"].quantile(0.995)
+    print(f"  price cap (99.5th pct): {price_cap:.2f}")
 
-    print("Preparing test set...")
-    test = prepare(test_raw, is_train=False, clip_bounds=clip_bounds)
+    print("Preparing training set ")
+    train = prepare(train_raw, is_train=True, clip_bounds=clip_bounds, price_cap=price_cap)
 
-    print("Adding target encodings...")
-    train, test = add_target_encodings(train, test)
+    print("Preparing test set")
+    test = prepare(test_raw, is_train=False, clip_bounds=clip_bounds, price_cap=price_cap)
 
-    print("Splitting train / validation...")
+    print("Splitting train / validation ")
     train_fold, val_fold = split_train_val(train)
+
+    print("Adding target encodings")
+    train_fold, val_fold = add_target_encodings(train_fold, val_fold)
+    train_fold, test     = add_target_encodings(train_fold, test)
 
     print(f"  train : {len(train_fold):,} rows")
     print(f"  val   : {len(val_fold):,} rows")
     print(f"  test  : {len(test):,} rows")
     print(f"  features: {list(train_fold.columns)}")
+
+    print("Dataset creation")
+    train_fold.to_parquet("prepared_train.parquet", index=False)
+    val_fold.to_parquet("prepared_val.parquet",   index=False)
+    test.to_parquet("prepared_test.parquet",       index=False)
+    print("  saved prepared_train.parquet, prepared_val.parquet, prepared_test.parquet")
 
 
