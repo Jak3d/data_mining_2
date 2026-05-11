@@ -39,7 +39,7 @@ def impute_missing(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-#MATCH / MISMATCH INDICATORS [Wang, 2nd place ICDM 2013]
+#MATCH / MISMATCH INDICATORS [Wang, 2nd place ICDM 2013] 
 #
 # visitor_hist_* are ~95% missing.  Instead of imputing, signal alignment.
 
@@ -142,6 +142,7 @@ def build_target_encodings(
 def add_target_encodings(
     train: pd.DataFrame,
     test: pd.DataFrame,
+    smoothing: float = 10.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     train, test = train.copy(), test.copy()
 
@@ -153,12 +154,14 @@ def add_target_encodings(
     ]
 
     for keys, target, name in encoding_specs:
-        enc = build_target_encodings(train, keys, target)
-        train[name] = train.set_index(keys).index.map(enc.get)
-        test[name]  = test.set_index(keys).index.map(enc.get)
         global_mean = train[target].mean()
-        train[name] = train[name].fillna(global_mean)
-        test[name]  = test[name].fillna(global_mean)
+        agg_sum     = train.groupby(keys)[target].transform("sum")
+        agg_count   = train.groupby(keys)[target].transform("count")
+        # LOO: subtract current row so the model can't memorise its own label
+        train[name] = (agg_sum - train[target] + smoothing * global_mean) / (agg_count - 1 + smoothing)
+        # Global smoothed encoding for held-out sets (no leakage risk there)
+        enc_lookup  = build_target_encodings(train, keys, target, smoothing)
+        test[name]  = test.set_index(keys).index.map(enc_lookup.get).fillna(global_mean)
 
     return train, test
 
@@ -286,9 +289,9 @@ def report_outliers(df: pd.DataFrame, bounds: dict) -> None:
 
 def prepare(df: pd.DataFrame, is_train: bool = True, clip_bounds: dict = None, price_cap: float = None) -> pd.DataFrame:
     df = add_date_features(df)
-    df = add_missingness_flags(df)   # before imputation so NaNs are still present
+    df = add_missingness_flags(df)      # before imputation so NaNs are still present
+    df = add_competitor_aggregates(df)  # before imputation so comp_count reflects actual coverage
     df = impute_missing(df)
-    df = add_competitor_aggregates(df)
     df = add_visitor_history_indicators(df)
     df = add_gap_features(df)
     df = transform_price(df, cap=price_cap)
@@ -325,7 +328,7 @@ if __name__ == "__main__":
 
     print("Adding target encodings")
     train_fold, val_fold = add_target_encodings(train_fold, val_fold)
-    train_fold, test     = add_target_encodings(train_fold, test)
+    _,          test     = add_target_encodings(train_fold, test)
 
     print(f"  train : {len(train_fold):,} rows")
     print(f"  val   : {len(val_fold):,} rows")
