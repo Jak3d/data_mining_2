@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"C:\\\\Users\\\\marro\\\\.claude\\\\projects\" -name \"*.jsonl\" -type f 2>/dev/null | head -20)",
+      "Read(//c/Users/marro/.claude/projects/**)",
+      "Bash(find \"C:\\\\Users\\\\marro\\\\.claude\" -type d -name \"backups\" 2>/dev/null | head -5)",
+      "Read(//c/Users/marro/.claude/**)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

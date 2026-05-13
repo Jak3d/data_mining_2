@@ -1,0 +1,1 @@
+Without _rank/_zscore features: NDCG@5 = 0.3766
